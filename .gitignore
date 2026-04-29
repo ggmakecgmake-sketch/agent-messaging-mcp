@@ -1,8 +1,18 @@
+# Archivos de build/cache
 __pycache__/
 *.pyc
 .venv/
-data/*.sqlite3
-data/*.sqlite3-*
+src/agent_messaging_mcp.egg-info/
+
+# Transcripts (demasiado grandes y en markdown, se exportan separado)
 transcripts/*.md
 transcripts/*.jsonl
+
+# Screenshots (binarios grandes, se exportan separado)
 screenshots/
+
+# Backups temporales de SQLite
+data/*-backup-*.sqlite3
+data/*.sqlite3-journal
+data/*.sqlite3-wal
+data/*.sqlite3-shm
