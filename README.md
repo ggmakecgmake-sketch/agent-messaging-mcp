@@ -67,3 +67,25 @@ export AGENT_MESSAGING_UI_FALLBACK=1
 ```
 
 With that flag, WhatsApp sends use the same MCP/CLI entrypoint and operate the visible Firefox session through `xdotool`, saving screenshots under Brain Sync.
+
+---
+
+## Data Recovery Note — 2026-04-29 Session
+
+During today's session, Telegram Web crashed mid-transcription. A full chat extraction of the **Cristian Gomez** Telegram DM was printed to the Python stdout buffer during `full_extract.py` / `safe_full_extract.py` execution but **failed to be INSERTed into the local SQLite database** before the script aborted.
+
+**Status:**
+- SQLite DB (`data/messaging.sqlite3`) holds the pre-incident state (1 WhatsApp chat, 1 auto message).
+- Telegram data from today exists **only in the session log/output** of the `safe_full_extract.py` run and was not persisted.
+- A `messaging_dump_20260429.sql` exports the current DB schema + data for portability.
+
+**TODO for future session:**
+1. Re-open Telegram Web and re-run `safe_full_extract.py` to rebuild the full transcript.
+2. Verify INSERT returns non-zero row counts for each table.
+3. Run `database_status()` to confirm total message and chat counts.
+
+---
+
+## Repository Link
+
+https://github.com/ggmakecgmake-sketch/agent-messaging-mcp
