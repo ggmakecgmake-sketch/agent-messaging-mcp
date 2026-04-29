@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agent_messaging
+      POSTGRES_USER: agentmsg
+      POSTGRES_PASSWORD: agentmsg
+    ports:
+      - target: 5432
+        published: 55432
+        protocol: tcp
+        mode: host
+    volumes:
+      - agent_messaging_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentmsg -d agent_messaging"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: any
+        delay: 5s
+      placement:
+        constraints:
+          - node.role == manager
+
+volumes:
+  agent_messaging_pg:

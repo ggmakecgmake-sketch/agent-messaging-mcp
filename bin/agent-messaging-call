@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="/home/cristian/agent-messaging-mcp"
+export PYTHONPATH="$ROOT/src:${PYTHONPATH:-}"
+cd "$ROOT"
+exec python3 -m agent_messaging_mcp.mcp_call "$@"
