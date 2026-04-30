@@ -105,6 +105,7 @@ class MessageStore:
                       title text,
                       phone text,
                       last_seen_at timestamptz,
+                      last_synced_at timestamptz,
                       created_at timestamptz not null default now(),
                       updated_at timestamptz not null default now(),
                       unique(platform, chat_key)
@@ -117,9 +118,15 @@ class MessageStore:
                       sender text,
                       body text,
                       sent_at text,
+                      sent_at_parsed timestamptz,
+                      sent_at_unix double precision,
+                      message_hash text,
                       raw jsonb,
-                      created_at timestamptz not null default now()
+                      created_at timestamptz not null default now(),
+                      unique(chat_id, message_hash)
                     );
+                    create index if not exists idx_messages_hash on messages(chat_id, message_hash);
+                    create index if not exists idx_messages_chat_parsed on messages(chat_id, sent_at_parsed);
                     create table if not exists transcripts (
                       id bigserial primary key,
                       platform text not null,
@@ -128,6 +135,19 @@ class MessageStore:
                       message_count integer not null,
                       started_at text,
                       ended_at text,
+                      created_at timestamptz not null default now()
+                    );
+                    create table if not exists sync_logs (
+                      id bigserial primary key,
+                      platform text not null,
+                      chat_key text not null,
+                      status text not null default 'started',
+                      messages_before integer default 0,
+                      messages_after integer default 0,
+                      messages_inserted integer default 0,
+                      started_at timestamptz not null default now(),
+                      ended_at timestamptz,
+                      error_message text,
                       created_at timestamptz not null default now()
                     );
                     """
@@ -145,6 +165,7 @@ class MessageStore:
                   title text,
                   phone text,
                   last_seen_at text,
+                  last_synced_at text,
                   created_at text not null,
                   updated_at text not null,
                   unique(platform, chat_key)
@@ -157,9 +178,14 @@ class MessageStore:
                   sender text,
                   body text,
                   sent_at text,
+                  sent_at_parsed text,
+                  sent_at_unix real,
+                  message_hash text,
                   raw text,
                   created_at text not null
                 );
+                create unique index if not exists idx_msg_unique_hash on messages(chat_id, message_hash);
+                create index if not exists idx_messages_chat_parsed on messages(chat_id, sent_at_parsed);
                 create table if not exists transcripts (
                   id integer primary key autoincrement,
                   platform text not null,
@@ -169,6 +195,19 @@ class MessageStore:
                   started_at text,
                   ended_at text,
                   created_at text not null
+                );
+                create table if not exists sync_logs (
+                  id integer primary key autoincrement,
+                  platform text not null,
+                  chat_key text not null,
+                  status text not null default 'started',
+                  messages_before integer default 0,
+                  messages_after integer default 0,
+                  messages_inserted integer default 0,
+                  started_at text not null,
+                  ended_at text,
+                  error_message text,
+                  created_at text not null default current_timestamp
                 );
                 """
             )
@@ -181,6 +220,7 @@ class MessageStore:
         chat_key: str,
         title: str | None = None,
         phone: str | None = None,
+        last_synced_at: str | None = None,
     ) -> int:
         now = utc_now()
         if self._backend == "postgres":
@@ -188,33 +228,36 @@ class MessageStore:
             with self._pg.cursor() as cur:
                 cur.execute(
                     """
-                    insert into chats(platform, browser, chat_key, title, phone, last_seen_at, created_at, updated_at)
-                    values (%s, %s, %s, %s, %s, now(), now(), now())
+                    insert into chats(platform, browser, chat_key, title, phone, last_seen_at, last_synced_at, created_at, updated_at)
+                    values (%s, %s, %s, %s, %s, now(), %s, now(), now())
                     on conflict(platform, chat_key) do update set
                       browser = excluded.browser,
                       title = coalesce(excluded.title, chats.title),
                       phone = coalesce(excluded.phone, chats.phone),
                       last_seen_at = now(),
+                      last_synced_at = coalesce(excluded.last_synced_at, chats.last_synced_at),
                       updated_at = now()
                     returning id
                     """,
-                    (platform, browser, chat_key, title, phone),
+                    (platform, browser, chat_key, title, phone, last_synced_at),
                 )
                 return int(cur.fetchone()[0])
 
         with self._sqlite() as conn:
+            sync_val = last_synced_at or now
             conn.execute(
                 """
-                insert into chats(platform, browser, chat_key, title, phone, last_seen_at, created_at, updated_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?)
+                insert into chats(platform, browser, chat_key, title, phone, last_seen_at, last_synced_at, created_at, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(platform, chat_key) do update set
                   browser = excluded.browser,
                   title = coalesce(excluded.title, chats.title),
                   phone = coalesce(excluded.phone, chats.phone),
                   last_seen_at = excluded.last_seen_at,
+                  last_synced_at = coalesce(excluded.last_synced_at, chats.last_synced_at),
                   updated_at = excluded.updated_at
                 """,
-                (platform, browser, chat_key, title, phone, now, now, now),
+                (platform, browser, chat_key, title, phone, now, sync_val, now, now),
             )
             row = conn.execute(
                 "select id from chats where platform = ? and chat_key = ?",
@@ -222,55 +265,160 @@ class MessageStore:
             ).fetchone()
             return int(row["id"])
 
+    @staticmethod
+    def _compute_msg_hash(chat_id: int, platform: str, direction: str, sender: str, body: str, sent_at: str) -> str:
+        from hashlib import sha256
+        payload = f"{chat_id}|{platform}|{direction}|{sender}|{body}|{sent_at}"
+        return sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _parse_whatsapp_sent_at(raw: str | None):
+        import re
+        from datetime import datetime
+        if not raw:
+            return None, None
+        m = re.search(r'\[(\d{1,2}):(\d{2})\s*([ap]\.?\s*m\.?)?,\s*(\d{1,2})/(\d{1,2})/(\d{4})\]', str(raw).lower())
+        if m:
+            hour, minute = int(m.group(1)), int(m.group(2))
+            ampm = (m.group(3) or "").lower()
+            day, month, year = int(m.group(4)), int(m.group(5)), int(m.group(6))
+            if "p" in ampm and hour != 12:
+                hour += 12
+            elif "a" in ampm and hour == 12:
+                hour = 0
+            try:
+                dt = datetime(year, month, day, hour, minute)
+                return dt.strftime("%Y-%m-%dT%H:%M:%S"), float(dt.timestamp())
+            except Exception:
+                pass
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            return dt.strftime("%Y-%m-%dT%H:%M:%S"), float(dt.timestamp())
+        except Exception:
+            pass
+        return None, None
+
     def insert_messages(self, chat_id: int, platform: str, messages: Iterable[dict[str, Any]]) -> int:
         rows = list(messages)
         if not rows:
             return 0
+
+        inserted = 0
+        if self._backend == "postgres":
+            assert self._pg is not None
+            with self._pg.cursor() as cur:
+                for row in rows:
+                    raw_time = row.get("time") or row.get("sent_at") or ""
+                    parsed_iso, parsed_unix = self._parse_whatsapp_sent_at(raw_time)
+                    body = row.get("text") or row.get("body") or ""
+                    msg_hash = self._compute_msg_hash(
+                        chat_id, platform,
+                        row.get("direction") or "", row.get("sender") or "",
+                        body, raw_time,
+                    )
+                    try:
+                        cur.execute(
+                            """
+                            insert into messages(chat_id, platform, direction, sender, body, sent_at,
+                                sent_at_parsed, sent_at_unix, message_hash, raw, created_at)
+                            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                            on conflict(chat_id, message_hash) do nothing
+                            """,
+                            (
+                                chat_id, platform, row.get("direction"), row.get("sender"),
+                                body, raw_time, parsed_iso, parsed_unix,
+                                msg_hash, json.dumps(row, ensure_ascii=False),
+                            ),
+                        )
+                        if cur.rowcount > 0:
+                            inserted += 1
+                    except Exception:
+                        pass
+            return inserted
+
+        with self._sqlite() as conn:
+            for row in rows:
+                raw_time = row.get("time") or row.get("sent_at") or ""
+                parsed_iso, parsed_unix = self._parse_whatsapp_sent_at(raw_time)
+                body = row.get("text") or row.get("body") or ""
+                msg_hash = self._compute_msg_hash(
+                    chat_id, platform,
+                    row.get("direction") or "", row.get("sender") or "",
+                    body, raw_time,
+                )
+                try:
+                    conn.execute(
+                        """
+                        insert into messages(chat_id, platform, direction, sender, body, sent_at,
+                            sent_at_parsed, sent_at_unix, message_hash, raw, created_at)
+                        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            chat_id, platform, row.get("direction"), row.get("sender"),
+                            body, raw_time, parsed_iso, parsed_unix,
+                            msg_hash, json.dumps(row, ensure_ascii=False), utc_now(),
+                        ),
+                    )
+                    inserted += 1
+                except sqlite3.IntegrityError:
+                    pass
+        return inserted
+
+    def log_sync_start(self, platform: str, chat_key: str) -> int:
         now = utc_now()
         if self._backend == "postgres":
             assert self._pg is not None
             with self._pg.cursor() as cur:
-                cur.executemany(
-                    """
-                    insert into messages(chat_id, platform, direction, sender, body, sent_at, raw, created_at)
-                    values (%s, %s, %s, %s, %s, %s, %s, now())
-                    """,
-                    [
-                        (
-                            chat_id,
-                            platform,
-                            row.get("direction"),
-                            row.get("sender"),
-                            row.get("text") or row.get("body"),
-                            row.get("time"),
-                            json.dumps(row, ensure_ascii=False),
-                        )
-                        for row in rows
-                    ],
+                cur.execute(
+                    "insert into sync_logs(platform, chat_key, status, started_at) values (%s, %s, %s, %s) returning id",
+                    (platform, chat_key, "started", now),
                 )
-            return len(rows)
-
+                return int(cur.fetchone()[0])
         with self._sqlite() as conn:
-            conn.executemany(
-                """
-                insert into messages(chat_id, platform, direction, sender, body, sent_at, raw, created_at)
-                values (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        chat_id,
-                        platform,
-                        row.get("direction"),
-                        row.get("sender"),
-                        row.get("text") or row.get("body"),
-                        row.get("time"),
-                        json.dumps(row, ensure_ascii=False),
-                        now,
-                    )
-                    for row in rows
-                ],
+            cur2 = conn.execute(
+                "insert into sync_logs(platform, chat_key, status, started_at) values (?, ?, ?, ?)",
+                (platform, chat_key, "started", now),
             )
-        return len(rows)
+            return cur2.lastrowid or 0
+
+    def log_sync_end(self, log_id: int, status: str, messages_before: int, messages_after: int, messages_inserted: int, error: str | None = None) -> None:
+        now = utc_now()
+        if self._backend == "postgres":
+            assert self._pg is not None
+            with self._pg.cursor() as cur:
+                cur.execute(
+                    """update sync_logs
+                    set status=%s, messages_before=%s, messages_after=%s, messages_inserted=%s,
+                        ended_at=%s, error_message=%s
+                    where id=%s""",
+                    (status, messages_before, messages_after, messages_inserted, now, error or None, log_id),
+                )
+            return
+        with self._sqlite() as conn:
+            conn.execute(
+                """update sync_logs
+                set status=?, messages_before=?, messages_after=?, messages_inserted=?,
+                    ended_at=?, error_message=?
+                where id=?""",
+                (status, messages_before, messages_after, messages_inserted, now, error or None, log_id),
+            )
+
+    def count_messages(self, chat_id: int | None = None) -> int:
+        if self._backend == "postgres":
+            assert self._pg is not None
+            with self._pg.cursor() as cur:
+                if chat_id:
+                    cur.execute("select count(*) from messages where chat_id = %s", (chat_id,))
+                else:
+                    cur.execute("select count(*) from messages")
+                return int(cur.fetchone()[0])
+        sql = "select count(*) from messages where chat_id = ?" if chat_id else "select count(*) from messages"
+        with self._sqlite() as conn:
+            if chat_id:
+                row = conn.execute(sql, (chat_id,)).fetchone()
+            else:
+                row = conn.execute(sql).fetchone()
+            return int(row[0]) if row else 0
 
     def insert_transcript(
         self,

@@ -34,6 +34,7 @@ class Settings:
     display: str = os.environ.get("DISPLAY", ":0")
     xauthority: str = os.environ.get("XAUTHORITY", str(Path.home() / ".Xauthority"))
     close_existing: bool = os.environ.get("AGENT_MESSAGING_CLOSE_EXISTING", "1") != "0"
+    humanized_typing: bool = os.environ.get("AGENT_MESSAGING_HUMANIZED", "1") != "0"
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

@@ -130,11 +130,25 @@ def transcribe_chat(
     try:
         platform = normalize_platform(platform)
         c = _controller(browser)
+        store = _store()
+        log_id = store.log_sync_start(platform, str(chat))
+        chat_id = store.upsert_chat(platform=platform, browser=c.browser, chat_key=str(chat), title=str(chat))
+        messages_before = store.count_messages(chat_id)
+        
         messages = c.transcribe_chat(platform, chat, max_scrolls=max_scrolls)
         transcript = _write_transcript(platform, chat, messages, output_dir)
-        store = _store()
-        chat_id = store.upsert_chat(platform=platform, browser=c.browser, chat_key=str(chat), title=str(chat))
         inserted = store.insert_messages(chat_id, platform, messages)
+        messages_after = store.count_messages(chat_id)
+        store.log_sync_end(
+            log_id, 
+            "completed" if inserted == len(messages) else "partial",
+            messages_before=messages_before,
+            messages_after=messages_after,
+            messages_inserted=inserted,
+        )
+        # Actualizar last_synced_at del chat
+        store.upsert_chat(platform=platform, browser=c.browser, chat_key=str(chat), title=str(chat), last_synced_at=utc_now())
+        
         store.insert_transcript(
             platform=platform,
             chat_key=str(chat),
@@ -147,6 +161,9 @@ def transcribe_chat(
             "browser": c.browser,
             "chat": chat,
             "message_count": len(messages),
+            "messages_before": messages_before,
+            "messages_after": messages_after,
+            "new_messages_inserted": messages_after - messages_before,
             "stored_messages": inserted,
             "transcript": transcript,
             "jsonl": str(Path(transcript).with_suffix(".jsonl")),
