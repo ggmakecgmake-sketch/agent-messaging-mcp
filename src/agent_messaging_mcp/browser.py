@@ -157,11 +157,41 @@ def _default_firefox_profile() -> str | None:
     return fallback
 
 
+def _list_whatsapp_chats(driver) -> list[str]:
+    """Extract visible chat titles from WhatsApp Web DOM."""
+    try:
+        rows = driver.find_elements(By.CSS_SELECTOR, '[role="row"]')
+        chats = []
+        for row in rows:
+            try:
+                span = row.find_element(By.CSS_SELECTOR, 'span[title]')
+                title = span.get_attribute('title')
+                if title and title not in chats:
+                    chats.append(title)
+            except Exception:
+                pass
+        return chats
+    except Exception:
+        return []
+
+
+def _list_telegram_chats(driver) -> list[str]:
+    try:
+        rows = driver.find_elements(By.CSS_SELECTOR, '.chatlist-chat, .ListItem, [role="listitem"]')
+        chats = []
+        for row in rows:
+            try:
+                title = (row.get_attribute('innerText') or '').split('\n')[0].strip()
+                if title and title not in chats:
+                    chats.append(title)
+            except Exception:
+                pass
+        return chats
+    except Exception:
+        return []
+
+
 def _clean_phone(value: str) -> str:
-    return "".join(ch for ch in value if ch.isdigit())
-
-
-def _safe_slug(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", value.strip())[:80].strip("-")
     return slug or "chat"
 
@@ -188,15 +218,10 @@ class BrowserController:
                 options.page_load_strategy = "eager"
                 options.set_preference("dom.webnotifications.enabled", False)
                 options.set_preference("media.navigator.permission.disabled", True)
-                profile_name = os.environ.get("AGENT_MESSAGING_FIREFOX_PROFILE_NAME", "default-release").strip()
-                if profile_name:
-                    options.add_argument("-P")
-                    options.add_argument(profile_name)
-                else:
-                    profile = _default_firefox_profile()
-                    if profile:
-                        options.add_argument("-profile")
-                        options.add_argument(profile)
+                profile = _default_firefox_profile()
+                if profile:
+                    options.add_argument("-profile")
+                    options.add_argument(profile)
                 self.driver = webdriver.Firefox(options=options)
             else:
                 options = webdriver.ChromeOptions()

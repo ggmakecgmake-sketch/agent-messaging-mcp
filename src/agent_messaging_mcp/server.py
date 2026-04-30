@@ -8,7 +8,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from .browser import BrowserController, BrowserError, normalize_browser, normalize_platform
+from .browser import BrowserController, BrowserError, normalize_browser, normalize_platform, _list_whatsapp_chats, _list_telegram_chats
 from .db import MessageStore, utc_now
 from .settings import get_settings
 from .ui_fallback import send_whatsapp_message
@@ -187,6 +187,24 @@ def close_messaging_browser(browser: str = "firefox") -> dict[str, Any]:
         if controller:
             controller.quit()
         return {"ok": True, "browser": key, "closed": bool(controller)}
+    except Exception as exc:
+        return _error(exc)
+
+
+@mcp.tool()
+def get_chat_list(platform: str, browser: str = "firefox") -> dict[str, Any]:
+    """List all visible chat titles from WhatsApp Web or Telegram Web."""
+    try:
+        platform = normalize_platform(platform)
+        c = _controller(browser)
+        c.open_platform(platform)
+        time.sleep(3)  # Allow list to render
+        driver = c.d
+        if platform == "whatsapp":
+            titles = _list_whatsapp_chats(driver)
+        else:
+            titles = _list_telegram_chats(driver)
+        return {"ok": True, "platform": platform, "browser": c.browser, "count": len(titles), "chats": titles}
     except Exception as exc:
         return _error(exc)
 
